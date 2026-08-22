@@ -2,3 +2,4 @@ streamlit
 google-generativeai
 chromadb
 pypdf
+sentence-transformers
