@@ -529,30 +529,5 @@ if prompt := st.chat_input(
             "content": answer
         }
     )
-````
-
-### The key change
-
-The very first thing `process_question()` does is:
-
-```python
-context = search_knowledge(prompt)
-```
-
-So now:
-
-```text
-User asks question
-       ↓
-search_knowledge()
-       ↓
-PDF/database has answer?
-   ↓              ↓
- YES             NO
-   ↓              ↓
-Gemini       Your existing
-+ PDF        tool system
-context
-
 
 
