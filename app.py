@@ -1,9 +1,8 @@
-  
 import streamlit as st
 import sqlite3
 import requests
+import re
 
-from openai import OpenAI
 from pypdf import PdfReader
 
 
@@ -13,12 +12,7 @@ from pypdf import PdfReader
 
 DB_NAME = "ingres.db"
 
-OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 TAVILY_API_KEY = st.secrets["TAVILY_API_KEY"]
-
-client = OpenAI(
-    api_key=OPENAI_API_KEY
-)
 
 
 # =====================================================
@@ -46,7 +40,7 @@ if "pdf_text" not in st.session_state:
 
 
 # =====================================================
-# DISPLAY CHAT HISTORY
+# CHAT HISTORY
 # =====================================================
 
 for message in st.session_state.messages:
@@ -68,7 +62,7 @@ uploaded_file = st.sidebar.file_uploader(
 
 if uploaded_file is not None:
 
-    if st.sidebar.button("Add PDF"):
+    if st.sidebar.button("Add PDF to Knowledge Base"):
 
         try:
 
@@ -97,6 +91,17 @@ if uploaded_file is not None:
 
 
 # =====================================================
+# CLEAR CHAT
+# =====================================================
+
+if st.sidebar.button("Clear Chat"):
+
+    st.session_state.messages = []
+
+    st.rerun()
+
+
+# =====================================================
 # DATABASE CONNECTION
 # =====================================================
 
@@ -106,41 +111,10 @@ def get_connection():
 
 
 # =====================================================
-# GET DATABASE LOCATIONS
+# GET ALL ASSESSMENTS
 # =====================================================
 
-def get_database_locations():
-
-    conn = get_connection()
-
-    cursor = conn.cursor()
-
-    try:
-
-        cursor.execute("""
-        SELECT
-            state,
-            district,
-            block
-        FROM assessments
-        """)
-
-        rows = cursor.fetchall()
-
-        return rows
-
-    finally:
-
-        conn.close()
-
-
-# =====================================================
-# SEARCH ASSESSMENTS
-# =====================================================
-
-def search_assessments(question):
-
-    q = question.lower()
+def get_all_assessments():
 
     conn = get_connection()
 
@@ -162,128 +136,7 @@ def search_assessments(question):
         FROM assessments
         """)
 
-        rows = cursor.fetchall()
-
-        # -------------------------------------------------
-        # FIRST: LOOK FOR EXACT LOCATION NAMES
-        # -------------------------------------------------
-
-        location_matches = []
-
-        for row in rows:
-
-            state = str(row[0]).lower()
-            district = str(row[1]).lower()
-            block = str(row[2]).lower()
-
-            score = 0
-
-            # Exact district match gets highest priority
-            if district in q:
-                score += 100
-
-            # Exact block match
-            if block in q:
-                score += 80
-
-            # Exact state match
-            if state in q:
-                score += 40
-
-            if score > 0:
-
-                location_matches.append(
-                    (score, row)
-                )
-
-        # -------------------------------------------------
-        # RETURN LOCATION MATCHES
-        # -------------------------------------------------
-
-        if location_matches:
-
-            location_matches.sort(
-                key=lambda x: x[0],
-                reverse=True
-            )
-
-            result = ""
-
-            for score, row in location_matches:
-
-                result += f"""
-State: {row[0]}
-District: {row[1]}
-Block: {row[2]}
-Year: {row[3]}
-Recharge: {row[4]} BCM
-Extractable Groundwater: {row[5]} BCM
-Extraction: {row[6]} BCM
-Stage of Extraction: {row[7]}%
-Category: {row[8]}
-
-"""
-
-            return result
-
-        # -------------------------------------------------
-        # SECOND: CATEGORY SEARCH
-        # -------------------------------------------------
-
-        categories = [
-            "safe",
-            "semi-critical",
-            "semi critical",
-            "critical",
-            "over-exploited",
-            "over exploited"
-        ]
-
-        category_matches = []
-
-        for row in rows:
-
-            category = str(
-                row[8]
-            ).lower()
-
-            for cat in categories:
-
-                if cat in q:
-
-                    normalized_category = (
-                        cat.replace(
-                            " ",
-                            "-"
-                        )
-                    )
-
-                    if category == normalized_category:
-
-                        category_matches.append(row)
-
-        if category_matches:
-
-            result = ""
-
-            for row in category_matches:
-
-                result += f"""
-State: {row[0]}
-District: {row[1]}
-Block: {row[2]}
-Year: {row[3]}
-Recharge: {row[4]} BCM
-Extractable Groundwater: {row[5]} BCM
-Extraction: {row[6]} BCM
-Stage of Extraction: {row[7]}%
-Category: {row[8]}
-
-"""
-
-            return result
-
-        return ""
+        return cursor.fetchall()
 
     finally:
 
@@ -291,7 +144,184 @@ Category: {row[8]}
 
 
 # =====================================================
-# SPECIAL DATABASE QUERIES
+# FIND LOCATION
+# =====================================================
+
+def find_location(question):
+
+    q = question.lower()
+
+    rows = get_all_assessments()
+
+    matches = []
+
+    for row in rows:
+
+        state = str(row[0]).lower()
+        district = str(row[1]).lower()
+        block = str(row[2]).lower()
+
+        score = 0
+
+        if district in q:
+            score += 100
+
+        if block in q:
+            score += 80
+
+        if state in q:
+            score += 30
+
+        if score > 0:
+
+            matches.append(
+                (score, row)
+            )
+
+    matches.sort(
+        key=lambda x: x[0],
+        reverse=True
+    )
+
+    if matches:
+
+        return [
+            row
+            for score, row in matches
+        ]
+
+    return []
+
+
+# =====================================================
+# FORMAT ASSESSMENT
+# =====================================================
+
+def format_assessment(row):
+
+    return f"""
+### 📍 Groundwater Assessment
+
+**State:** {row[0]}
+
+**District:** {row[1]}
+
+**Block:** {row[2]}
+
+**Year:** {row[3]}
+
+**Groundwater Recharge:** {row[4]} BCM
+
+**Extractable Groundwater:** {row[5]} BCM
+
+**Groundwater Extraction:** {row[6]} BCM
+
+**Stage of Extraction:** {row[7]}%
+
+**Category:** {row[8]}
+"""
+
+
+# =====================================================
+# SEARCH ASSESSMENT DATABASE
+# =====================================================
+
+def search_assessments(question):
+
+    matches = find_location(question)
+
+    if matches:
+
+        answer = ""
+
+        for row in matches:
+
+            answer += format_assessment(row)
+
+            answer += "\n---\n"
+
+        return answer
+
+    return ""
+
+
+# =====================================================
+# FAQ SEARCH
+# =====================================================
+
+def search_faq(question):
+
+    conn = get_connection()
+
+    cursor = conn.cursor()
+
+    try:
+
+        cursor.execute("""
+        SELECT question, answer
+        FROM faq
+        """)
+
+        rows = cursor.fetchall()
+
+    finally:
+
+        conn.close()
+
+    q = question.lower()
+
+    # -------------------------------------------------
+    # DIRECT FAQ MATCHING
+    # -------------------------------------------------
+
+    best_match = None
+
+    best_score = 0
+
+    for faq_question, faq_answer in rows:
+
+        faq_q = faq_question.lower()
+
+        score = 0
+
+        # Exact phrase
+        if faq_q in q:
+
+            score += 100
+
+        # Important keywords
+        words = re.findall(
+            r"[a-zA-Z]+",
+            faq_q
+        )
+
+        for word in words:
+
+            if len(word) > 3 and word in q:
+
+                score += 10
+
+        if score > best_score:
+
+            best_score = score
+
+            best_match = (
+                faq_question,
+                faq_answer
+            )
+
+    if best_match and best_score > 0:
+
+        return (
+            f"**{best_match[0]}**\n\n"
+            f"{best_match[1]}"
+        )
+
+    return ""
+
+
+# =====================================================
+# SPECIAL DATABASE QUESTIONS
 # =====================================================
 
 def special_database_query(question):
@@ -304,15 +334,15 @@ def special_database_query(question):
 
     try:
 
-        # -------------------------------------------------
-        # HIGHEST STAGE
-        # -------------------------------------------------
+        # =================================================
+        # HIGHEST EXTRACTION
+        # =================================================
 
         if (
             "highest" in q
             and (
-                "stage" in q
-                or "extraction" in q
+                "extraction" in q
+                or "stage" in q
             )
         ):
 
@@ -333,26 +363,29 @@ def special_database_query(question):
             if row:
 
                 return f"""
-The location with the highest groundwater
-stage of extraction is:
+### 🔴 Highest Groundwater Extraction
 
-District: {row[1]}
-State: {row[0]}
-Block: {row[2]}
-Stage of Extraction: {row[3]}%
-Category: {row[4]}
+**District:** {row[1]}
+
+**State:** {row[0]}
+
+**Block:** {row[2]}
+
+**Stage of Extraction:** {row[3]}%
+
+**Category:** {row[4]}
 """
 
 
-        # -------------------------------------------------
-        # LOWEST STAGE
-        # -------------------------------------------------
+        # =================================================
+        # LOWEST EXTRACTION
+        # =================================================
 
         if (
             "lowest" in q
             and (
-                "stage" in q
-                or "extraction" in q
+                "extraction" in q
+                or "stage" in q
             )
         ):
 
@@ -373,24 +406,28 @@ Category: {row[4]}
             if row:
 
                 return f"""
-The location with the lowest groundwater
-stage of extraction is:
+### 🟢 Lowest Groundwater Extraction
 
-District: {row[1]}
-State: {row[0]}
-Block: {row[2]}
-Stage of Extraction: {row[3]}%
-Category: {row[4]}
+**District:** {row[1]}
+
+**State:** {row[0]}
+
+**Block:** {row[2]}
+
+**Stage of Extraction:** {row[3]}%
+
+**Category:** {row[4]}
 """
 
 
-        # -------------------------------------------------
+        # =================================================
         # OVER-EXPLOITED
-        # -------------------------------------------------
+        # =================================================
 
         if (
             "over-exploited" in q
             or "over exploited" in q
+            or "overexploited" in q
         ):
 
             cursor.execute("""
@@ -407,14 +444,15 @@ Category: {row[4]}
 
             if rows:
 
-                answer = (
-                    "The over-exploited areas are:\n\n"
-                )
+                answer = """
+### 🔴 Over-Exploited Areas
+
+"""
 
                 for row in rows:
 
                     answer += (
-                        f"- {row[1]}, {row[0]} "
+                        f"- **{row[1]}**, {row[0]} "
                         f"({row[2]}) — "
                         f"{row[3]}% extraction\n"
                     )
@@ -422,9 +460,9 @@ Category: {row[4]}
                 return answer
 
 
-        # -------------------------------------------------
-        # SAFE AREAS
-        # -------------------------------------------------
+        # =================================================
+        # SAFE
+        # =================================================
 
         if (
             "safe areas" in q
@@ -445,12 +483,15 @@ Category: {row[4]}
 
             if rows:
 
-                answer = "The safe areas are:\n\n"
+                answer = """
+### 🟢 Safe Areas
+
+"""
 
                 for row in rows:
 
                     answer += (
-                        f"- {row[1]}, {row[0]} "
+                        f"- **{row[1]}**, {row[0]} "
                         f"({row[2]}) — "
                         f"{row[3]}% extraction\n"
                     )
@@ -458,9 +499,9 @@ Category: {row[4]}
                 return answer
 
 
-        # -------------------------------------------------
-        # CRITICAL AREAS
-        # -------------------------------------------------
+        # =================================================
+        # CRITICAL
+        # =================================================
 
         if (
             "critical areas" in q
@@ -481,12 +522,15 @@ Category: {row[4]}
 
             if rows:
 
-                answer = "The critical areas are:\n\n"
+                answer = """
+### 🟠 Critical Areas
+
+"""
 
                 for row in rows:
 
                     answer += (
-                        f"- {row[1]}, {row[0]} "
+                        f"- **{row[1]}**, {row[0]} "
                         f"({row[2]}) — "
                         f"{row[3]}% extraction\n"
                     )
@@ -501,89 +545,7 @@ Category: {row[4]}
 
 
 # =====================================================
-# SEARCH FAQ
-# =====================================================
-
-def search_faq(question):
-
-    conn = get_connection()
-
-    cursor = conn.cursor()
-
-    try:
-
-        cursor.execute("""
-        SELECT
-            question,
-            answer
-        FROM faq
-        """)
-
-        rows = cursor.fetchall()
-
-        q = question.lower()
-
-        matches = []
-
-        for faq_question, faq_answer in rows:
-
-            faq_q = faq_question.lower()
-
-            score = 0
-
-            # Exact important phrase
-            if faq_q in q or q in faq_q:
-
-                score += 100
-
-            # Individual meaningful words
-            for word in faq_q.split():
-
-                word = word.strip(
-                    ".,?!:;'\""
-                )
-
-                if len(word) > 3 and word in q:
-
-                    score += 10
-
-            if score > 0:
-
-                matches.append(
-                    (
-                        score,
-                        faq_question,
-                        faq_answer
-                    )
-                )
-
-        matches.sort(
-            key=lambda x: x[0],
-            reverse=True
-        )
-
-        if not matches:
-
-            return ""
-
-        result = ""
-
-        for score, faq_question, faq_answer in matches[:3]:
-
-            result += (
-                f"Question: {faq_question}\n"
-                f"Answer: {faq_answer}\n\n"
-            )
-
-        return result
-
-    finally:
-
-        conn.close()
-
-
-# =====================================================
-# SEARCH PDF
+# PDF SEARCH
 # =====================================================
 
 def search_pdf(question):
@@ -594,31 +556,33 @@ def search_pdf(question):
 
         return ""
 
-    words = [
-        word.strip(
-            ".,?!:;'\""
-        ).lower()
+    question_words = re.findall(
+        r"[a-zA-Z0-9]+",
+        question.lower()
+    )
 
-        for word in question.split()
-
-        if len(word) > 2
-    ]
-
-    paragraphs = pdf_text.split("\n\n")
+    paragraphs = pdf_text.split("\n")
 
     matches = []
 
     for paragraph in paragraphs:
 
+        paragraph = paragraph.strip()
+
+        if not paragraph:
+            continue
+
         paragraph_lower = paragraph.lower()
 
         score = 0
 
-        for word in words:
+        for word in question_words:
 
-            if word in paragraph_lower:
+            if len(word) > 2:
 
-                score += 1
+                if word in paragraph_lower:
+
+                    score += 1
 
         if score > 0:
 
@@ -638,69 +602,36 @@ def search_pdf(question):
 
         return ""
 
-    context = ""
+    answer = """
+### 📄 Information from Uploaded INGRES PDF
 
-    for score, paragraph in matches[:8]:
+"""
 
-        context += (
+    for score, paragraph in matches[:10]:
+
+        answer += (
             paragraph
             + "\n\n"
         )
 
-    return context
-
-
-# =====================================================
-# OPENAI ANSWER
-# =====================================================
-
-def ai_answer(question, context):
-
-    prompt = f"""
-You are an AI assistant for the INGRES project.
-
-Answer the user's question using the
-provided context.
-
-CONTEXT:
-
-{context}
-
-USER QUESTION:
-
-{question}
-
-Rules:
-
-- Do not invent facts.
-- Use the provided information.
-- Be clear and concise.
-- If the context does not contain the answer,
-  say so clearly.
-"""
-
-    response = client.responses.create(
-        model="gpt-5.6",
-        input=prompt
-    )
-
-    return response.output_text.strip()
+    return answer
 
 
 # =====================================================
 # TAVILY WEB SEARCH
 # =====================================================
 
-def search_web(query):
+def search_web(question):
 
     try:
 
         response = requests.post(
+
             "https://api.tavily.com/search",
 
             json={
                 "api_key": TAVILY_API_KEY,
-                "query": query,
+                "query": question,
                 "search_depth": "advanced",
                 "max_results": 5,
                 "include_answer": True
@@ -713,32 +644,159 @@ def search_web(query):
 
         data = response.json()
 
-        result = ""
+        answer = ""
 
         if data.get("answer"):
 
-            result += (
-                "Summary:\n"
+            answer += (
+                "### 🌐 Web Research\n\n"
                 + data["answer"]
                 + "\n\n"
             )
 
-        for item in data.get(
+        results = data.get(
             "results",
             []
-        ):
+        )
 
-            result += (
-                f"Title: {item.get('title', '')}\n"
-                f"URL: {item.get('url', '')}\n"
-                f"Content: {item.get('content', '')}\n\n"
-            )
+        if results:
 
-        return result
+            answer += "### Sources\n\n"
 
-    except Exception:
+            for result in results:
 
-        return ""
+                title = result.get(
+                    "title",
+                    ""
+                )
+
+                url = result.get(
+                    "url",
+                    ""
+                )
+
+                content = result.get(
+                    "content",
+                    ""
+                )
+
+                answer += (
+                    f"**{title}**\n\n"
+                    f"{content}\n\n"
+                    f"{url}\n\n"
+                )
+
+        return answer
+
+    except Exception as e:
+
+        return (
+            "Web search is currently unavailable."
+        )
+
+
+# =====================================================
+# SIMPLE QUESTION UNDERSTANDING
+# =====================================================
+
+def general_database_answer(question):
+
+    q = question.lower()
+
+    # -------------------------------------------------
+    # CATEGORY QUESTIONS
+    # -------------------------------------------------
+
+    if "category" in q:
+
+        matches = find_location(question)
+
+        if matches:
+
+            answer = ""
+
+            for row in matches:
+
+                answer += (
+                    f"**{row[1]}** is classified as "
+                    f"**{row[8]}**.\n\n"
+                )
+
+            return answer
+
+
+    # -------------------------------------------------
+    # STAGE QUESTIONS
+    # -------------------------------------------------
+
+    if (
+        "stage" in q
+        or "percentage" in q
+    ):
+
+        matches = find_location(question)
+
+        if matches:
+
+            answer = ""
+
+            for row in matches:
+
+                answer += (
+                    f"**{row[1]}** has a Stage of "
+                    f"Extraction of **{row[7]}%**.\n\n"
+                )
+
+            return answer
+
+
+    # -------------------------------------------------
+    # RECHARGE QUESTIONS
+    # -------------------------------------------------
+
+    if "recharge" in q:
+
+        matches = find_location(question)
+
+        if matches:
+
+            answer = ""
+
+            for row in matches:
+
+                answer += (
+                    f"Groundwater recharge in "
+                    f"**{row[1]}** is "
+                    f"**{row[4]} BCM**.\n\n"
+                )
+
+            return answer
+
+
+    # -------------------------------------------------
+    # EXTRACTION QUESTIONS
+    # -------------------------------------------------
+
+    if "extraction" in q:
+
+        matches = find_location(question)
+
+        if matches:
+
+            answer = ""
+
+            for row in matches:
+
+                answer += (
+                    f"Groundwater extraction in "
+                    f"**{row[1]}** is "
+                    f"**{row[6]} BCM**.\n\n"
+                )
+
+            return answer
+
+
+    return ""
 
 
 # =====================================================
@@ -748,7 +806,7 @@ def search_web(query):
 def process_question(question):
 
     # =================================================
-    # 1. SPECIAL DATABASE QUERIES
+    # 1. SPECIAL DATABASE
     # =================================================
 
     result = special_database_query(
@@ -761,71 +819,78 @@ def process_question(question):
 
 
     # =================================================
-    # 2. ASSESSMENTS FIRST
+    # 2. LOCATION / ASSESSMENT DATABASE
     # =================================================
 
-    assessment_context = search_assessments(
+    result = search_assessments(
         question
     )
 
-    if assessment_context:
+    if result:
 
-        return assessment_context
+        return result
 
 
     # =================================================
-    # 3. FAQ SECOND
+    # 3. DATABASE-SPECIFIC QUESTIONS
     # =================================================
 
-    faq_context = search_faq(
+    result = general_database_answer(
         question
     )
 
-    if faq_context:
+    if result:
 
-        return faq_context
+        return result
 
 
     # =================================================
-    # 4. PDF
+    # 4. FAQ
     # =================================================
 
-    pdf_context = search_pdf(
+    result = search_faq(
         question
     )
 
-    if pdf_context:
+    if result:
 
-        return ai_answer(
-            question,
-            pdf_context
-        )
+        return result
 
 
     # =================================================
-    # 5. WEB
+    # 5. PDF
     # =================================================
 
-    web_context = search_web(
+    result = search_pdf(
         question
     )
 
-    if web_context:
+    if result:
 
-        return ai_answer(
-            question,
-            web_context
-        )
+        return result
 
 
     # =================================================
-    # 6. GENERAL AI
+    # 6. WEB
     # =================================================
 
-    return ai_answer(
-        question,
-        "No relevant INGRES database or PDF information was found."
+    result = search_web(
+        question
     )
+
+    if result:
+
+        return result
+
+
+    # =================================================
+    # 7. NOTHING FOUND
+    # =================================================
+
+    return """
+I couldn't find relevant information in the
+INGRES database, uploaded PDF, or web search.
+"""
 
 
 # =====================================================
@@ -833,7 +898,7 @@ def process_question(question):
 # =====================================================
 
 if prompt := st.chat_input(
-    "Ask your question..."
+    "Ask your INGRES question..."
 ):
 
     if not prompt.strip():
@@ -875,13 +940,15 @@ if prompt := st.chat_input(
 
         except Exception as e:
 
-            answer = f"Error: {e}"
+            answer = (
+                f"Database error: {e}"
+            )
 
         st.markdown(answer)
 
 
     # -------------------------------------------------
-    # SAVE ANSWER
+    # SAVE
     # -------------------------------------------------
 
     st.session_state.messages.append(
@@ -889,4 +956,4 @@ if prompt := st.chat_input(
             "role": "assistant",
             "content": answer
         }
-    )
+          )
