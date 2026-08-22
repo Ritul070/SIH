@@ -1,48 +1,60 @@
+    
 import streamlit as st
 import google.generativeai as genai
+import requests
 import json
-import sqlite3
-import chromadb
-
-from pypdf import PdfReader
-from sentence_transformers import SentenceTransformer
 
 
-
+# =====================================================
+# CONFIGURATION
+# =====================================================
 
 API_KEY = st.secrets["API_KEY"]
+TAVILY_API_KEY = st.secrets["TAVILY_API_KEY"]
 
 genai.configure(api_key=API_KEY)
 
 model = genai.GenerativeModel("gemini-2.5-flash")
 
 
+# =====================================================
+# PAGE CONFIG
+# =====================================================
 
-
-chroma_client = chromadb.PersistentClient(
-    path="chroma_data"
+st.set_page_config(
+    page_title="INGRES AI Assistant",
+    page_icon="🤖",
+    layout="wide"
 )
 
-collection = chroma_client.get_or_create_collection(
-    name="ingres_knowledge"
-)
+st.title("🤖 INGRES AI Assistant")
 
 
+# =====================================================
+# CHAT HISTORY
+# =====================================================
 
-@st.cache_resource
-def load_embedding_model():
-    return SentenceTransformer("all-MiniLM-L6-v2")
-
-
-embedding_model = load_embedding_model()
-
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
 
+for message in st.session_state.messages:
+
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+
+# =====================================================
+# PDF UPLOAD
+# =====================================================
+
+st.sidebar.header("📚 Knowledge Base")
 
 uploaded_file = st.sidebar.file_uploader(
-    "Upload INGRES PDF",
+    "Upload PDF",
     type=["pdf"]
 )
+
 
 if uploaded_file is not None:
 
@@ -50,347 +62,219 @@ if uploaded_file is not None:
 
         try:
 
-            # Read PDF
-            reader = PdfReader(uploaded_file)
+            # Your existing PDF/database function
+            from database import add_pdf
 
-            full_text = ""
+            with st.spinner("Processing PDF..."):
 
-            for page in reader.pages:
-
-                text = page.extract_text()
-
-                if text:
-                    full_text += text + "\n"
-
-            
-
-            chunk_size = 1000
-            overlap = 200
-
-            chunks = []
-
-            start = 0
-
-            while start < len(full_text):
-
-                end = start + chunk_size
-
-                chunk = full_text[start:end].strip()
-
-                if chunk:
-                    chunks.append(chunk)
-
-                start += chunk_size - overlap
-
-           
-
-            embeddings = embedding_model.encode(
-                chunks
-            ).tolist()
-
-      
-
-            ids = [
-                f"{uploaded_file.name}_{i}"
-                for i in range(len(chunks))
-            ]
-
-         
-
-            collection.upsert(
-                ids=ids,
-                documents=chunks,
-                embeddings=embeddings,
-                metadatas=[
-                    {
-                        "source": uploaded_file.name
-                    }
-                    for _ in chunks
-                ]
-            )
+                chunks = add_pdf(uploaded_file)
 
             st.sidebar.success(
-                f"PDF added successfully! "
-                f"{len(chunks)} chunks stored."
+                f"PDF added successfully. "
+                f"{chunks} chunks stored."
             )
 
         except Exception as e:
 
             st.sidebar.error(
-                f"PDF Error: {e}"
+                f"PDF error: {e}"
             )
 
 
+# =====================================================
+# WEB SEARCH
+# =====================================================
 
-
-def calculate_math(expression):
-
-    try:
-        return str(eval(expression))
-
-    except Exception as e:
-        return f"Math Error: {e}"
-
-
-def count_words(text):
-
-    return str(len(text.split()))
-
-
-
-
-def query_database(sql_query):
+def search_web(query):
 
     try:
 
-        conn = sqlite3.connect("ingres.db")
-
-        cursor = conn.cursor()
-
-        cursor.execute(sql_query)
-
-        rows = cursor.fetchall()
-
-        conn.close()
-
-        if not rows:
-            return "No matching data found."
-
-        return str(rows)
-
-    except Exception as e:
-
-        return f"Database Error: {e}"
-
-
-
-def search_knowledge(question):
-
-    try:
-
-        # Convert question into embedding
-        question_embedding = embedding_model.encode(
-            [question]
-        ).tolist()
-
-        # Search ChromaDB
-        results = collection.query(
-            query_embeddings=question_embedding,
-            n_results=5
+        response = requests.post(
+            "https://api.tavily.com/search",
+            json={
+                "api_key": TAVILY_API_KEY,
+                "query": query,
+                "search_depth": "advanced",
+                "max_results": 5,
+                "include_answer": True
+            },
+            timeout=30
         )
 
-        documents = results.get(
-            "documents",
-            [[]]
-        )[0]
+        response.raise_for_status()
 
-        if not documents:
+        data = response.json()
 
-            return "No relevant information found."
+        result = ""
 
-        # Combine retrieved chunks
-        context = "\n\n".join(documents)
+        if data.get("answer"):
 
-        return context
+            result += (
+                "Summary:\n"
+                + data["answer"]
+                + "\n\n"
+            )
 
-    except Exception as e:
+        for item in data.get("results", []):
 
-        return f"ChromaDB Error: {e}"
+            result += (
+                f"Title: {item.get('title', '')}\n"
+                f"URL: {item.get('url', '')}\n"
+                f"Content: {item.get('content', '')}\n\n"
+            )
 
+        return result
 
+    except Exception:
 
-st.title("🤖 INGRES AI Virtual Assistant")
-
-st.write(
-    "I can answer INGRES questions using "
-    "the database and uploaded PDF documents."
-)
-
-
-
-if "messages" not in st.session_state:
-
-    st.session_state.messages = []
+        return ""
 
 
-for msg in st.session_state.messages:
+# =====================================================
+# MAIN AI TOOL SYSTEM
+# =====================================================
 
-    with st.chat_message(msg["role"]):
+def process_question(prompt):
 
-        st.markdown(msg["content"])
+    # -------------------------------------------------
+    # IMPORTANT:
+    # FIRST CHECK THE KNOWLEDGE BASE
+    # -------------------------------------------------
 
+    try:
 
+        context = search_knowledge(prompt)
 
+    except Exception:
 
-prompt = st.chat_input(
-    "Ask me anything..."
-)
-
-
-if prompt:
-
-
-
-    st.session_state.messages.append(
-        {
-            "role": "user",
-            "content": prompt
-        }
-    )
-
-    with st.chat_message("user"):
-
-        st.markdown(prompt)
+        context = ""
 
 
+    # -------------------------------------------------
+    # IF PDF DATABASE HAS INFORMATION
+    # -------------------------------------------------
+
+    if context and context.strip():
+
+        database_prompt = f"""
+You are an AI assistant for the INGRES project.
+
+The user has asked a question.
+
+The following information was retrieved
+from the uploaded PDF knowledge base:
+
+-------------------------
+PDF CONTEXT
+-------------------------
+
+{context}
+
+-------------------------
+USER QUESTION
+-------------------------
+
+{prompt}
+
+-------------------------
+INSTRUCTIONS
+-------------------------
+
+Answer the user's question using the retrieved
+PDF information.
+
+Rules:
+
+1. Use the PDF context as the primary source.
+2. Do not invent information.
+3. Do not ignore information present in the context.
+4. Give a direct and helpful answer.
+5. You may combine information from different
+   retrieved sections.
+6. If the context genuinely does not contain
+   the answer, say that the uploaded documents
+   do not contain enough information.
+
+Answer the user now.
+"""
+
+        response = model.generate_content(
+            database_prompt
+        )
+
+        return response.text.strip()
 
 
-    system_prompt = """
+    # -------------------------------------------------
+    # DATABASE DID NOT HAVE RELEVANT INFORMATION
+    # -------------------------------------------------
 
-You are an AI routing agent for the INGRES
-(India Ground Water Resource Estimation System)
-virtual assistant.
+    system_prompt = f"""
+You are an AI assistant for the INGRES project.
 
-Your job is to understand the user's question
-and select the correct tool.
-
-You MUST reply ONLY with a JSON object.
-
-Do not write any explanation outside JSON.
-
-
-AVAILABLE TOOLS:
-
+You have access to these tools:
 
 1. calculator
-
-Use this for mathematical calculations.
-
-Example:
-
-{
-    "tool": "calculator",
-    "input": "45 * 32"
-}
-
-
 2. word_counter
-
-Use this when the user asks to count words.
-
-Example:
-
-{
-    "tool": "word_counter",
-    "input": "hello world"
-}
-
-
 3. database
-
-Use this when the user asks about structured
-INGRES groundwater data.
-
-The SQLite database contains:
-
-assessments(
-    id,
-    state,
-    district,
-    block,
-    year,
-    recharge_bcm,
-    extractable_bcm,
-    extraction_bcm,
-    stage_percent,
-    category
-)
-
-Example:
-
-User:
-Which areas in Gujarat are over-exploited?
-
-Output:
-
-{
-    "tool": "database",
-    "input": "SELECT state, district, block, stage_percent, category FROM assessments WHERE state='Gujarat' AND category='Over-Exploited'"
-}
-
-
-User:
-What is the groundwater extraction stage of Anand?
-
-Output:
-
-{
-    "tool": "database",
-    "input": "SELECT district, block, stage_percent, category FROM assessments WHERE district='Anand'"
-}
-
-
 4. knowledge_base
+5. web_search
 
-Use this when the user asks about information
-that may be contained inside uploaded PDF documents.
+The knowledge_base was already checked for this
+question and did not contain relevant information.
 
-Example:
+Choose the correct tool.
 
-User:
-What does the uploaded INGRES report say about groundwater recharge?
+Return ONLY valid JSON.
 
-Output:
+Examples:
 
-{
-    "tool": "knowledge_base",
-    "input": "groundwater recharge"
-}
+For mathematics:
+{{
+    "tool": "calculator",
+    "input": "25 * 5"
+}}
 
+For word counting:
+{{
+    "tool": "word_counter",
+    "input": "text here"
+}}
 
-5. none
+For structured project database:
+{{
+    "tool": "database",
+    "input": "SELECT ..."
+}}
 
-Use this for normal conversation or greetings.
+For current/latest information:
+{{
+    "tool": "web_search",
+    "input": "search query"
+}}
 
-Example:
-
-{
+If no tool is required:
+{{
     "tool": "none",
-    "input": "Hello! How can I help you?"
-}
+    "input": ""
+}}
 
+User question:
 
-IMPORTANT:
-
-For database queries, ONLY generate SELECT queries.
-
-Never generate:
-
-INSERT
-UPDATE
-DELETE
-DROP
-ALTER
-
-Reply ONLY with valid JSON.
-
-
-User Input:
+{prompt}
 """
 
 
-
-
-    full_prompt = system_prompt + prompt
-
     response = model.generate_content(
-        full_prompt
+        system_prompt
     )
 
     ai_thought = response.text.strip()
 
 
-   
+    # -------------------------------------------------
+    # REMOVE MARKDOWN CODE BLOCK
+    # -------------------------------------------------
 
     if ai_thought.startswith("```"):
 
@@ -401,6 +285,9 @@ User Input:
         ).strip()
 
 
+    # -------------------------------------------------
+    # PARSE JSON
+    # -------------------------------------------------
 
     try:
 
@@ -408,59 +295,86 @@ User Input:
 
         tool_name = command.get("tool")
 
-        tool_input = command.get("input")
+        tool_input = command.get(
+            "input",
+            ""
+        )
 
 
+    except Exception:
+
+        # If router fails, simply ask Gemini
+        response = model.generate_content(
+            prompt
+        )
+
+        return response.text.strip()
 
 
-        if tool_name == "calculator":
+    # =================================================
+    # CALCULATOR
+    # =================================================
 
-            final_answer = calculate_math(
-                tool_input
+    if tool_name == "calculator":
+
+        return calculate_math(
+            tool_input
+        )
+
+
+    # =================================================
+    # WORD COUNTER
+    # =================================================
+
+    elif tool_name == "word_counter":
+
+        return count_words(
+            tool_input
+        )
+
+
+    # =================================================
+    # SQL DATABASE
+    # =================================================
+
+    elif tool_name == "database":
+
+        sql_query = tool_input.strip()
+
+        if not sql_query.lower().startswith(
+            "select"
+        ):
+
+            return (
+                "Database security error: "
+                "only SELECT queries are allowed."
+            )
+
+        return query_database(
+            sql_query
+        )
+
+
+    # =================================================
+    # KNOWLEDGE BASE
+    # =================================================
+
+    elif tool_name == "knowledge_base":
+
+        context = search_knowledge(
+            tool_input
+        )
+
+        if not context or not context.strip():
+
+            return (
+                "I could not find relevant "
+                "information in the uploaded "
+                "documents."
             )
 
 
-
-
-        elif tool_name == "word_counter":
-
-            final_answer = count_words(
-                tool_input
-            )
-
-
-
-
-        elif tool_name == "database":
-
-            sql_query = tool_input.strip()
-
-            # Security check
-            if not sql_query.lower().startswith("select"):
-
-                final_answer = (
-                    "Database security error: "
-                    "only SELECT queries are allowed."
-                )
-
-            else:
-
-                final_answer = query_database(
-                    sql_query
-                )
-
-
-
-
-        elif tool_name == "knowledge_base":
-
-            context = search_knowledge(
-                tool_input
-            )
-
-
-
-            answer_prompt = f"""
+        answer_prompt = f"""
 
 You are an AI assistant for INGRES.
 
@@ -468,60 +382,177 @@ Answer the user's question using the
 retrieved information from the uploaded
 PDF documents.
 
-Do not make up information.
+IMPORTANT:
 
-If the retrieved information does not
-contain the answer, clearly say that
-the uploaded documents do not contain
-enough information.
+- Use the retrieved PDF information.
+- Do not make up information.
+- Answer directly and clearly.
+- Do not claim information is missing if
+  it is present in the retrieved context.
+- If the answer genuinely is not present,
+  say that the uploaded documents do not
+  contain enough information.
 
 Retrieved PDF Context:
 
 {context}
 
-
 User Question:
 
 {prompt}
 
-
 Give a clear and helpful answer.
 """
 
-            answer_response = model.generate_content(
-                answer_prompt
-            )
 
-            final_answer = answer_response.text
-
-
-
-
-        else:
-
-            final_answer = tool_input
-
-
-    except Exception as e:
-
-        final_answer = (
-            f"Agent failed.\n\n"
-            f"AI raw output:\n{ai_thought}\n\n"
-            f"Error: {e}"
+        answer_response = model.generate_content(
+            answer_prompt
         )
 
+        return answer_response.text.strip()
 
 
+    # =================================================
+    # WEB SEARCH
+    # =================================================
+
+    elif tool_name == "web_search":
+
+        web_context = search_web(
+            tool_input
+        )
+
+        if not web_context:
+
+            return (
+                "I could not perform the "
+                "web search right now."
+            )
+
+
+        web_prompt = f"""
+You are a research assistant.
+
+Answer the user's question using the
+web research below.
+
+WEB RESEARCH:
+
+{web_context}
+
+USER QUESTION:
+
+{prompt}
+
+Give a clear and accurate answer.
+"""
+
+        response = model.generate_content(
+            web_prompt
+        )
+
+        return response.text.strip()
+
+
+    # =================================================
+    # NORMAL GEMINI
+    # =================================================
+
+    else:
+
+        response = model.generate_content(
+            prompt
+        )
+
+        return response.text.strip()
+
+
+# =====================================================
+# CHAT INPUT
+# =====================================================
+
+if prompt := st.chat_input(
+    "Ask something..."
+):
+
+    # -------------------------------------------------
+    # SAVE USER MESSAGE
+    # -------------------------------------------------
+
+    st.session_state.messages.append(
+        {
+            "role": "user",
+            "content": prompt
+        }
+    )
+
+
+    with st.chat_message("user"):
+
+        st.markdown(prompt)
+
+
+    # -------------------------------------------------
+    # GENERATE RESPONSE
+    # -------------------------------------------------
 
     with st.chat_message("assistant"):
 
-        st.markdown(final_answer)
+        with st.spinner(
+            "Thinking..."
+        ):
+
+            try:
+
+                answer = process_question(
+                    prompt
+                )
+
+            except Exception as e:
+
+                answer = (
+                    f"Error while processing "
+                    f"your question: {e}"
+                )
 
 
+        st.markdown(answer)
+
+
+    # -------------------------------------------------
+    # SAVE ASSISTANT MESSAGE
+    # -------------------------------------------------
 
     st.session_state.messages.append(
         {
             "role": "assistant",
-            "content": final_answer
+            "content": answer
         }
     )
+````
+
+### The key change
+
+The very first thing `process_question()` does is:
+
+```python
+context = search_knowledge(prompt)
+```
+
+So now:
+
+```text
+User asks question
+       ↓
+search_knowledge()
+       ↓
+PDF/database has answer?
+   ↓              ↓
+ YES             NO
+   ↓              ↓
+Gemini       Your existing
++ PDF        tool system
+context
+
+
+
