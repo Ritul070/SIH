@@ -1,29 +1,28 @@
 
-
 import streamlit as st
-import google.generativeai as genai
+import sqlite3
 import requests
-import json
 
-from database import query_database
+from openai import OpenAI
+from pypdf import PdfReader
 
 
 # =====================================================
 # CONFIGURATION
 # =====================================================
 
-API_KEY = st.secrets["API_KEY"]
+DB_NAME = "ingres.db"
+
+OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 TAVILY_API_KEY = st.secrets["TAVILY_API_KEY"]
 
-genai.configure(api_key=API_KEY)
-
-model = genai.GenerativeModel(
-    "gemini-2.5-flash"
+client = OpenAI(
+    api_key=OPENAI_API_KEY
 )
 
 
 # =====================================================
-# PAGE
+# PAGE CONFIG
 # =====================================================
 
 st.set_page_config(
@@ -36,101 +35,546 @@ st.title("🤖 INGRES AI Assistant")
 
 
 # =====================================================
-# CHAT HISTORY
+# SESSION STATE
 # =====================================================
 
 if "messages" not in st.session_state:
-
     st.session_state.messages = []
 
+if "pdf_text" not in st.session_state:
+    st.session_state.pdf_text = ""
+
+
+# =====================================================
+# DISPLAY CHAT HISTORY
+# =====================================================
 
 for message in st.session_state.messages:
 
     with st.chat_message(message["role"]):
-
         st.markdown(message["content"])
 
 
 # =====================================================
-# PDF
+# SIDEBAR PDF UPLOAD
 # =====================================================
 
-st.sidebar.header("📄 PDF Knowledge Base")
+st.sidebar.header("📄 INGRES PDF")
 
 uploaded_file = st.sidebar.file_uploader(
-    "Upload PDF",
+    "Upload INGRES PDF",
     type=["pdf"]
 )
 
 
+if uploaded_file is not None:
+
+    if st.sidebar.button("Add PDF"):
+
+        try:
+
+            reader = PdfReader(uploaded_file)
+
+            full_text = ""
+
+            for page in reader.pages:
+
+                text = page.extract_text()
+
+                if text:
+                    full_text += text + "\n"
+
+            st.session_state.pdf_text = full_text
+
+            st.sidebar.success(
+                "PDF added successfully!"
+            )
+
+        except Exception as e:
+
+            st.sidebar.error(
+                f"PDF error: {e}"
+            )
+
+
 # =====================================================
-# PDF SEARCH
+# DATABASE CONNECTION
 # =====================================================
 
-def search_knowledge(question):
+def get_connection():
 
-    if uploaded_file is None:
+    return sqlite3.connect(DB_NAME)
 
-        return ""
+
+# =====================================================
+# SEARCH FAQ DATABASE
+# =====================================================
+
+def search_faq(question):
+
+    conn = get_connection()
+    cursor = conn.cursor()
 
     try:
 
-        from pypdf import PdfReader
+        cursor.execute("""
+        SELECT question, answer
+        FROM faq
+        """)
 
-        reader = PdfReader(uploaded_file)
+        rows = cursor.fetchall()
 
-        text = ""
+        question_lower = question.lower()
 
-        for page in reader.pages:
+        matches = []
 
-            page_text = page.extract_text()
+        for faq_question, faq_answer in rows:
 
-            if page_text:
+            text = (
+                faq_question + " " + faq_answer
+            ).lower()
 
-                text += page_text + "\n"
+            score = 0
 
-        if not text.strip():
+            for word in question_lower.split():
 
-            return ""
+                word = word.strip(
+                    ".,?!:;'\""
+                )
 
-        # Give Gemini the PDF text
-        # and let it determine relevant information.
+                if len(word) > 2 and word in text:
+                    score += 1
 
-        prompt = f"""
-You are searching an uploaded INGRES PDF.
+            if score > 0:
+
+                matches.append(
+                    (score, faq_question, faq_answer)
+                )
+
+        matches.sort(
+            key=lambda x: x[0],
+            reverse=True
+        )
+
+        result = ""
+
+        for score, q, answer in matches[:5]:
+
+            result += (
+                f"Question: {q}\n"
+                f"Answer: {answer}\n\n"
+            )
+
+        return result
+
+    finally:
+
+        conn.close()
+
+
+# =====================================================
+# SEARCH ASSESSMENTS DATABASE
+# =====================================================
+
+def search_assessments(question):
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+
+        cursor.execute("""
+        SELECT
+            state,
+            district,
+            block,
+            year,
+            recharge_bcm,
+            extractable_bcm,
+            extraction_bcm,
+            stage_percent,
+            category
+        FROM assessments
+        """)
+
+        rows = cursor.fetchall()
+
+        question_lower = question.lower()
+
+        matches = []
+
+        for row in rows:
+
+            state = str(row[0])
+            district = str(row[1])
+            block = str(row[2])
+            year = str(row[3])
+            recharge = str(row[4])
+            extractable = str(row[5])
+            extraction = str(row[6])
+            stage = str(row[7])
+            category = str(row[8])
+
+            searchable_text = f"""
+            {state}
+            {district}
+            {block}
+            {year}
+            {recharge}
+            {extractable}
+            {extraction}
+            {stage}
+            {category}
+            """.lower()
+
+            score = 0
+
+            for word in question_lower.split():
+
+                word = word.strip(
+                    ".,?!:;'\""
+                )
+
+                if len(word) > 2 and word in searchable_text:
+                    score += 1
+
+            if score > 0:
+
+                matches.append(
+                    (score, row)
+                )
+
+        matches.sort(
+            key=lambda x: x[0],
+            reverse=True
+        )
+
+        result = ""
+
+        for score, row in matches[:10]:
+
+            result += f"""
+State: {row[0]}
+District: {row[1]}
+Block: {row[2]}
+Year: {row[3]}
+Recharge: {row[4]} BCM
+Extractable Groundwater: {row[5]} BCM
+Extraction: {row[6]} BCM
+Stage of Extraction: {row[7]}%
+Category: {row[8]}
+
+"""
+
+        return result
+
+    finally:
+
+        conn.close()
+
+
+# =====================================================
+# SPECIAL DATABASE QUERIES
+# =====================================================
+
+def special_database_query(question):
+
+    q = question.lower()
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+
+        # ---------------------------------------------
+        # HIGHEST STAGE
+        # ---------------------------------------------
+
+        if (
+            "highest" in q
+            and (
+                "stage" in q
+                or "extraction" in q
+            )
+        ):
+
+            cursor.execute("""
+            SELECT
+                state,
+                district,
+                block,
+                stage_percent,
+                category
+            FROM assessments
+            ORDER BY stage_percent DESC
+            LIMIT 1
+            """)
+
+            row = cursor.fetchone()
+
+            if row:
+
+                return f"""
+The location with the highest groundwater
+stage of extraction is:
+
+District: {row[1]}
+State: {row[0]}
+Block: {row[2]}
+Stage of Extraction: {row[3]}%
+Category: {row[4]}
+"""
+
+
+        # ---------------------------------------------
+        # LOWEST STAGE
+        # ---------------------------------------------
+
+        if (
+            "lowest" in q
+            and (
+                "stage" in q
+                or "extraction" in q
+            )
+        ):
+
+            cursor.execute("""
+            SELECT
+                state,
+                district,
+                block,
+                stage_percent,
+                category
+            FROM assessments
+            ORDER BY stage_percent ASC
+            LIMIT 1
+            """)
+
+            row = cursor.fetchone()
+
+            if row:
+
+                return f"""
+The location with the lowest groundwater
+stage of extraction is:
+
+District: {row[1]}
+State: {row[0]}
+Block: {row[2]}
+Stage of Extraction: {row[3]}%
+Category: {row[4]}
+"""
+
+
+        # ---------------------------------------------
+        # OVER-EXPLOITED
+        # ---------------------------------------------
+
+        if (
+            "over-exploited" in q
+            or "over exploited" in q
+        ):
+
+            cursor.execute("""
+            SELECT
+                state,
+                district,
+                block,
+                stage_percent
+            FROM assessments
+            WHERE category = 'Over-Exploited'
+            """)
+
+            rows = cursor.fetchall()
+
+            if rows:
+
+                answer = "Over-exploited areas:\n\n"
+
+                for row in rows:
+
+                    answer += (
+                        f"- {row[1]}, {row[0]} "
+                        f"({row[2]}) — "
+                        f"{row[3]}% extraction\n"
+                    )
+
+                return answer
+
+
+        # ---------------------------------------------
+        # SAFE AREAS
+        # ---------------------------------------------
+
+        if (
+            "safe areas" in q
+            or "which areas are safe" in q
+        ):
+
+            cursor.execute("""
+            SELECT
+                state,
+                district,
+                block,
+                stage_percent
+            FROM assessments
+            WHERE category = 'Safe'
+            """)
+
+            rows = cursor.fetchall()
+
+            if rows:
+
+                answer = "Safe areas:\n\n"
+
+                for row in rows:
+
+                    answer += (
+                        f"- {row[1]}, {row[0]} "
+                        f"({row[2]}) — "
+                        f"{row[3]}% extraction\n"
+                    )
+
+                return answer
+
+
+        # ---------------------------------------------
+        # CRITICAL AREAS
+        # ---------------------------------------------
+
+        if (
+            "critical areas" in q
+            or "which areas are critical" in q
+        ):
+
+            cursor.execute("""
+            SELECT
+                state,
+                district,
+                block,
+                stage_percent
+            FROM assessments
+            WHERE category = 'Critical'
+            """)
+
+            rows = cursor.fetchall()
+
+            if rows:
+
+                answer = "Critical areas:\n\n"
+
+                for row in rows:
+
+                    answer += (
+                        f"- {row[1]}, {row[0]} "
+                        f"({row[2]}) — "
+                        f"{row[3]}% extraction\n"
+                    )
+
+                return answer
+
+        return ""
+
+    finally:
+
+        conn.close()
+
+
+# =====================================================
+# SEARCH PDF
+# =====================================================
+
+def search_pdf(question):
+
+    pdf_text = st.session_state.pdf_text
+
+    if not pdf_text:
+        return ""
+
+    words = [
+        word.strip(
+            ".,?!:;'\""
+        ).lower()
+
+        for word in question.split()
+
+        if len(word) > 2
+    ]
+
+    paragraphs = pdf_text.split("\n\n")
+
+    matches = []
+
+    for paragraph in paragraphs:
+
+        paragraph_lower = paragraph.lower()
+
+        score = 0
+
+        for word in words:
+
+            if word in paragraph_lower:
+                score += 1
+
+        if score > 0:
+
+            matches.append(
+                (score, paragraph)
+            )
+
+    matches.sort(
+        key=lambda x: x[0],
+        reverse=True
+    )
+
+    if not matches:
+        return ""
+
+    context = ""
+
+    for score, paragraph in matches[:8]:
+
+        context += (
+            paragraph + "\n\n"
+        )
+
+    return context
+
+
+# =====================================================
+# OPENAI ANSWER
+# =====================================================
+
+def ai_answer(question, context):
+
+    prompt = f"""
+You are an AI assistant for the INGRES project.
+
+Use the provided context to answer the
+user's question.
+
+CONTEXT:
+{context}
 
 USER QUESTION:
 {question}
 
-PDF CONTENT:
-{text}
-
-Return ONLY the parts of the PDF that are
-relevant to answering the user's question.
-
-If the PDF does not contain relevant
-information, return:
-
-NOT_FOUND
+Rules:
+- Do not invent facts.
+- Use the provided information.
+- Give a clear and helpful answer.
 """
 
-        response = model.generate_content(prompt)
+    response = client.responses.create(
+        model="gpt-5.6",
+        input=prompt
+    )
 
-        result = response.text.strip()
-
-        if result == "NOT_FOUND":
-
-            return ""
-
-        return result
-
-    except Exception:
-
-        return ""
+    return response.output_text.strip()
 
 
 # =====================================================
-# WEB SEARCH
+# TAVILY WEB SEARCH
 # =====================================================
 
 def search_web(query):
@@ -160,16 +604,20 @@ def search_web(query):
         if data.get("answer"):
 
             result += (
-                data["answer"]
+                "Summary:\n"
+                + data["answer"]
                 + "\n\n"
             )
 
-        for item in data.get("results", []):
+        for item in data.get(
+            "results",
+            []
+        ):
 
             result += (
-                f"Title: {item.get('title')}\n"
-                f"URL: {item.get('url')}\n"
-                f"Content: {item.get('content')}\n\n"
+                f"Title: {item.get('title', '')}\n"
+                f"URL: {item.get('url', '')}\n"
+                f"Content: {item.get('content', '')}\n\n"
             )
 
         return result
@@ -180,263 +628,90 @@ def search_web(query):
 
 
 # =====================================================
-# GENERATE SQL FROM QUESTION
-# =====================================================
-
-def generate_sql(question):
-
-    sql_prompt = f"""
-You are an SQL expert working with an INGRES
-groundwater database.
-
-The database has these tables.
-
-TABLE: assessments
-
-Columns:
-- id
-- state
-- district
-- block
-- year
-- recharge_bcm
-- extractable_bcm
-- extraction_bcm
-- stage_percent
-- category
-
-TABLE: faq
-
-Columns:
-- id
-- question
-- answer
-
-Convert the user's natural-language question
-into ONE SQLite SELECT query.
-
-Rules:
-
-1. Only generate SELECT queries.
-2. You can use JOIN, WHERE, GROUP BY,
-   ORDER BY, COUNT, AVG, MAX, MIN, etc.
-3. Search both assessments and faq when
-   appropriate.
-4. Do not invent table or column names.
-5. Return ONLY the SQL query.
-6. Do not use markdown.
-
-USER QUESTION:
-
-{question}
-"""
-
-    response = model.generate_content(
-        sql_prompt
-    )
-
-    sql = response.text.strip()
-
-    if sql.startswith("```"):
-
-        lines = sql.split("\n")
-
-        sql = "\n".join(
-            lines[1:-1]
-        ).strip()
-
-    return sql
-
-
-# =====================================================
-# ANSWER FROM DATABASE
-# =====================================================
-
-def answer_from_database(
-    question,
-    database_result
-):
-
-    prompt = f"""
-You are the INGRES AI assistant.
-
-Answer the user's question using the
-database result below.
-
-DATABASE RESULT:
-
-{database_result}
-
-USER QUESTION:
-
-{question}
-
-Rules:
-
-- Use the database result.
-- Do not invent information.
-- Explain numbers clearly.
-- If multiple records were returned,
-  summarize them appropriately.
-- Give a direct answer.
-"""
-
-    response = model.generate_content(
-        prompt
-    )
-
-    return response.text.strip()
-
-
-# =====================================================
-# MAIN QUESTION LOGIC
+# MAIN QUESTION ROUTER
 # =====================================================
 
 def process_question(question):
 
     # =================================================
-    # 1. DATABASE FIRST
+    # 1. SPECIAL DATABASE QUERY
     # =================================================
 
-    with st.spinner(
-        "🔎 Searching INGRES database..."
-    ):
-
-        try:
-
-            sql_query = generate_sql(
-                question
-            )
-
-            database_result = query_database(
-                sql_query
-            )
-
-        except Exception:
-
-            database_result = ""
-
-
-    # =================================================
-    # DATABASE FOUND SOMETHING
-    # =================================================
-
-    if database_result:
-
-        return answer_from_database(
-            question,
-            database_result
-        )
-
-
-    # =================================================
-    # 2. DATABASE DID NOT HAVE IT
-    # → CHECK PDF
-    # =================================================
-
-    with st.spinner(
-        "📄 Checking uploaded PDF..."
-    ):
-
-        pdf_context = search_knowledge(
-            question
-        )
-
-
-    if pdf_context:
-
-        prompt = f"""
-You are the INGRES AI assistant.
-
-Answer the user's question using the
-uploaded PDF information.
-
-PDF INFORMATION:
-
-{pdf_context}
-
-USER QUESTION:
-
-{question}
-
-Do not invent information.
-Give a clear and helpful answer.
-"""
-
-        response = model.generate_content(
-            prompt
-        )
-
-        return response.text.strip()
-
-
-    # =================================================
-    # 3. DATABASE + PDF DID NOT HAVE IT
-    # → NORMAL AI / WEB
-    # =================================================
-
-    router_prompt = f"""
-The INGRES database and uploaded PDF have
-already been checked.
-
-Decide whether this question requires
-a live web search.
-
-Reply ONLY YES or NO.
-
-Question:
-
-{question}
-"""
-
-    response = model.generate_content(
-        router_prompt
-    )
-
-    needs_web = response.text.strip().upper()
-
-
-    if "YES" in needs_web:
-
-        with st.spinner(
-            "🌐 Searching the web..."
-        ):
-
-            web_context = search_web(
-                question
-            )
-
-        prompt = f"""
-Answer the user's question using the
-following web research.
-
-WEB RESEARCH:
-
-{web_context}
-
-USER QUESTION:
-
-{question}
-
-Give a clear and accurate answer.
-"""
-
-        response = model.generate_content(
-            prompt
-        )
-
-        return response.text.strip()
-
-
-    # =================================================
-    # NORMAL GEMINI
-    # =================================================
-
-    response = model.generate_content(
+    result = special_database_query(
         question
     )
 
-    return response.text.strip()
+    if result:
+
+        return result
+
+
+    # =================================================
+    # 2. FAQ DATABASE
+    # =================================================
+
+    faq_context = search_faq(
+        question
+    )
+
+    if faq_context:
+
+        return faq_context
+
+
+    # =================================================
+    # 3. ASSESSMENT DATABASE
+    # =================================================
+
+    assessment_context = search_assessments(
+        question
+    )
+
+    if assessment_context:
+
+        return assessment_context
+
+
+    # =================================================
+    # 4. PDF
+    # =================================================
+
+    pdf_context = search_pdf(
+        question
+    )
+
+    if pdf_context:
+
+        return ai_answer(
+            question,
+            pdf_context
+        )
+
+
+    # =================================================
+    # 5. WEB SEARCH
+    # =================================================
+
+    web_context = search_web(
+        question
+    )
+
+    if web_context:
+
+        return ai_answer(
+            question,
+            web_context
+        )
+
+
+    # =================================================
+    # 6. GENERAL AI
+    # =================================================
+
+    return ai_answer(
+        question,
+        "No relevant INGRES database or PDF information was found."
+    )
 
 
 # =====================================================
@@ -444,21 +719,19 @@ Give a clear and accurate answer.
 # =====================================================
 
 if prompt := st.chat_input(
-    "Ask about INGRES..."
+    "Ask your question..."
 ):
 
     if not prompt.strip():
 
         st.warning(
-            "Please enter a question."
+            "Please enter a valid question."
         )
 
         st.stop()
 
 
-    # -------------------------------------------------
-    # USER MESSAGE
-    # -------------------------------------------------
+    # User message
 
     st.session_state.messages.append(
         {
@@ -472,9 +745,7 @@ if prompt := st.chat_input(
         st.markdown(prompt)
 
 
-    # -------------------------------------------------
-    # ASSISTANT
-    # -------------------------------------------------
+    # Assistant
 
     with st.chat_message("assistant"):
 
@@ -486,16 +757,12 @@ if prompt := st.chat_input(
 
         except Exception as e:
 
-            answer = (
-                f"Error: {e}"
-            )
+            answer = f"Error: {e}"
 
         st.markdown(answer)
 
 
-    # -------------------------------------------------
-    # SAVE ANSWER
-    # -------------------------------------------------
+    # Save assistant message
 
     st.session_state.messages.append(
         {
