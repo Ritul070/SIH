@@ -3,8 +3,6 @@ import google.generativeai as genai
 import requests
 import json
 
-from database import query_database, search_knowledge
-
 
 # =====================================================
 # CONFIGURATION
