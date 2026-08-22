@@ -1,8 +1,9 @@
-    
 import streamlit as st
 import google.generativeai as genai
 import requests
 import json
+
+from database import query_database, search_knowledge
 
 
 # =====================================================
@@ -10,6 +11,7 @@ import json
 # =====================================================
 
 API_KEY = st.secrets["API_KEY"]
+TAVILY_API_KEY = st.secrets["TAVILY_API_KEY"]
 
 genai.configure(api_key=API_KEY)
 
@@ -47,37 +49,28 @@ for message in st.session_state.messages:
 # PDF UPLOAD
 # =====================================================
 
-st.sidebar.header("📚 Knowledge Base")
+st.sidebar.header("📚 PDF Knowledge Base")
 
 uploaded_file = st.sidebar.file_uploader(
     "Upload PDF",
     type=["pdf"]
 )
 
-
 if uploaded_file is not None:
 
-    if st.sidebar.button("Add PDF to Knowledge Base"):
+    st.sidebar.success(
+        f"PDF uploaded: {uploaded_file.name}"
+    )
 
-        try:
-
-            # Your existing PDF/database function
-            from database import add_pdf
-
-            with st.spinner("Processing PDF..."):
-
-                chunks = add_pdf(uploaded_file)
-
-            st.sidebar.success(
-                f"PDF added successfully. "
-                f"{chunks} chunks stored."
-            )
-
-        except Exception as e:
-
-            st.sidebar.error(
-                f"PDF error: {e}"
-            )
+    # IMPORTANT:
+    # This keeps PDF handling separate from
+    # your built-in database.py.
+    #
+    # search_knowledge() should use this uploaded
+    # PDF when searching.
+    #
+    # If your existing search_knowledge() already
+    # handles uploaded PDFs, leave it as it is.
 
 
 # =====================================================
@@ -88,15 +81,19 @@ def search_web(query):
 
     try:
 
+        url = "https://api.tavily.com/search"
+
+        payload = {
+            "api_key": TAVILY_API_KEY,
+            "query": query,
+            "search_depth": "advanced",
+            "max_results": 5,
+            "include_answer": True
+        }
+
         response = requests.post(
-            "https://api.tavily.com/search",
-            json={
-                "api_key": TAVILY_API_KEY,
-                "query": query,
-                "search_depth": "advanced",
-                "max_results": 5,
-                "include_answer": True
-            },
+            url,
+            json=payload,
             timeout=30
         )
 
@@ -104,165 +101,277 @@ def search_web(query):
 
         data = response.json()
 
-        result = ""
+        combined_text = ""
 
         if data.get("answer"):
 
-            result += (
+            combined_text += (
                 "Summary:\n"
                 + data["answer"]
                 + "\n\n"
             )
 
-        for item in data.get("results", []):
+        if data.get("results"):
 
-            result += (
-                f"Title: {item.get('title', '')}\n"
-                f"URL: {item.get('url', '')}\n"
-                f"Content: {item.get('content', '')}\n\n"
-            )
+            combined_text += "Sources:\n\n"
 
-        return result
+            for result in data["results"]:
 
-    except Exception:
+                combined_text += (
+                    f"Title: {result.get('title', '')}\n"
+                    f"URL: {result.get('url', '')}\n"
+                    f"Content: {result.get('content', '')}\n\n"
+                )
+
+        return combined_text
+
+    except Exception as e:
 
         return ""
 
 
 # =====================================================
-# MAIN AI TOOL SYSTEM
+# CHECK IF DATABASE RESULT IS ACTUALLY RELEVANT
 # =====================================================
 
-def process_question(prompt):
+def check_database_relevance(
+    question,
+    database_result
+):
 
-    # -------------------------------------------------
-    # IMPORTANT:
-    # FIRST CHECK THE KNOWLEDGE BASE
-    # -------------------------------------------------
+    if not database_result:
+        return False
+
+    relevance_prompt = f"""
+You are checking whether the following
+INGRES database result actually answers
+the user's question.
+
+USER QUESTION:
+{question}
+
+DATABASE RESULT:
+{database_result}
+
+Reply ONLY:
+
+YES
+
+if the database result contains enough
+information to answer the question.
+
+Reply ONLY:
+
+NO
+
+if the result is unrelated or insufficient.
+"""
 
     try:
 
-        context = search_knowledge(prompt)
+        response = model.generate_content(
+            relevance_prompt
+        )
+
+        result = response.text.strip().upper()
+
+        return result == "YES"
 
     except Exception:
 
-        context = ""
+        return False
 
 
-    # -------------------------------------------------
-    # IF PDF DATABASE HAS INFORMATION
-    # -------------------------------------------------
+# =====================================================
+# CHECK PDF RELEVANCE
+# =====================================================
 
-    if context and context.strip():
+def check_pdf_relevance(
+    question,
+    pdf_context
+):
 
-        database_prompt = f"""
+    if not pdf_context:
+        return False
+
+    relevance_prompt = f"""
+You are checking whether the following
+uploaded PDF information answers the
+user's question.
+
+USER QUESTION:
+{question}
+
+PDF INFORMATION:
+{pdf_context}
+
+Reply ONLY:
+
+YES
+
+if the PDF information contains enough
+information to answer the question.
+
+Reply ONLY:
+
+NO
+
+if the information is unrelated or insufficient.
+"""
+
+    try:
+
+        response = model.generate_content(
+            relevance_prompt
+        )
+
+        result = response.text.strip().upper()
+
+        return result == "YES"
+
+    except Exception:
+
+        return False
+
+
+# =====================================================
+# ANSWER FROM DATABASE
+# =====================================================
+
+def answer_from_database(
+    question,
+    database_result
+):
+
+    prompt = f"""
 You are an AI assistant for the INGRES project.
 
-The user has asked a question.
+Answer the user's question using ONLY the
+provided INGRES database information.
 
-The following information was retrieved
-from the uploaded PDF knowledge base:
+DATABASE INFORMATION:
 
--------------------------
-PDF CONTEXT
--------------------------
+{database_result}
 
-{context}
+USER QUESTION:
 
--------------------------
-USER QUESTION
--------------------------
-
-{prompt}
-
--------------------------
-INSTRUCTIONS
--------------------------
-
-Answer the user's question using the retrieved
-PDF information.
+{question}
 
 Rules:
 
-1. Use the PDF context as the primary source.
-2. Do not invent information.
-3. Do not ignore information present in the context.
-4. Give a direct and helpful answer.
-5. You may combine information from different
-   retrieved sections.
-6. If the context genuinely does not contain
-   the answer, say that the uploaded documents
-   do not contain enough information.
-
-Answer the user now.
+- Use the database information.
+- Do not invent facts.
+- Give a clear and direct answer.
+- Do not mention that you are using a database
+  unless necessary.
 """
 
-        response = model.generate_content(
-            database_prompt
-        )
+    response = model.generate_content(prompt)
 
-        return response.text.strip()
+    return response.text.strip()
 
 
-    # -------------------------------------------------
-    # DATABASE DID NOT HAVE RELEVANT INFORMATION
-    # -------------------------------------------------
+# =====================================================
+# ANSWER FROM PDF
+# =====================================================
+
+def answer_from_pdf(
+    question,
+    pdf_context
+):
+
+    prompt = f"""
+You are an AI assistant for INGRES.
+
+Answer the user's question using ONLY the
+retrieved information from the uploaded PDF.
+
+RETRIEVED PDF INFORMATION:
+
+{pdf_context}
+
+USER QUESTION:
+
+{question}
+
+Rules:
+
+- Use the retrieved PDF information.
+- Do not invent facts.
+- Give a clear and direct answer.
+- If the information genuinely isn't present,
+  say that the uploaded document does not
+  contain enough information.
+"""
+
+    response = model.generate_content(prompt)
+
+    return response.text.strip()
+
+
+# =====================================================
+# NORMAL TOOL ROUTER
+# =====================================================
+
+def run_other_tools(prompt):
 
     system_prompt = f"""
-You are an AI assistant for the INGRES project.
+You are an AI assistant.
 
-You have access to these tools:
+The built-in INGRES database and uploaded PDF
+knowledge base have already been checked.
+
+Neither contains enough information to answer
+the user's question.
+
+Choose the appropriate tool.
+
+Available tools:
 
 1. calculator
 2. word_counter
 3. database
-4. knowledge_base
-5. web_search
-
-The knowledge_base was already checked for this
-question and did not contain relevant information.
-
-Choose the correct tool.
+4. web_search
+5. none
 
 Return ONLY valid JSON.
 
 Examples:
 
-For mathematics:
+Calculator:
 {{
     "tool": "calculator",
-    "input": "25 * 5"
+    "input": "25 * 10"
 }}
 
-For word counting:
+Word counter:
 {{
     "tool": "word_counter",
-    "input": "text here"
+    "input": "This is some text"
 }}
 
-For structured project database:
+Database:
 {{
     "tool": "database",
-    "input": "SELECT ..."
+    "input": "SELECT * FROM students"
 }}
 
-For current/latest information:
+Web:
 {{
     "tool": "web_search",
-    "input": "search query"
+    "input": "latest information about ..."
 }}
 
-If no tool is required:
+Normal answer:
 {{
     "tool": "none",
     "input": ""
 }}
 
-User question:
+USER QUESTION:
 
 {prompt}
 """
-
 
     response = model.generate_content(
         system_prompt
@@ -271,10 +380,7 @@ User question:
     ai_thought = response.text.strip()
 
 
-    # -------------------------------------------------
-    # REMOVE MARKDOWN CODE BLOCK
-    # -------------------------------------------------
-
+    # Remove ```json ... ```
     if ai_thought.startswith("```"):
 
         lines = ai_thought.split("\n")
@@ -283,10 +389,6 @@ User question:
             lines[1:-1]
         ).strip()
 
-
-    # -------------------------------------------------
-    # PARSE JSON
-    # -------------------------------------------------
 
     try:
 
@@ -300,140 +402,69 @@ User question:
         )
 
 
-    except Exception:
+        # =============================================
+        # CALCULATOR
+        # =============================================
 
-        # If router fails, simply ask Gemini
-        response = model.generate_content(
-            prompt
-        )
+        if tool_name == "calculator":
 
-        return response.text.strip()
-
-
-    # =================================================
-    # CALCULATOR
-    # =================================================
-
-    if tool_name == "calculator":
-
-        return calculate_math(
-            tool_input
-        )
-
-
-    # =================================================
-    # WORD COUNTER
-    # =================================================
-
-    elif tool_name == "word_counter":
-
-        return count_words(
-            tool_input
-        )
-
-
-    # =================================================
-    # SQL DATABASE
-    # =================================================
-
-    elif tool_name == "database":
-
-        sql_query = tool_input.strip()
-
-        if not sql_query.lower().startswith(
-            "select"
-        ):
-
-            return (
-                "Database security error: "
-                "only SELECT queries are allowed."
-            )
-
-        return query_database(
-            sql_query
-        )
-
-
-    # =================================================
-    # KNOWLEDGE BASE
-    # =================================================
-
-    elif tool_name == "knowledge_base":
-
-        context = search_knowledge(
-            tool_input
-        )
-
-        if not context or not context.strip():
-
-            return (
-                "I could not find relevant "
-                "information in the uploaded "
-                "documents."
+            return calculate_math(
+                tool_input
             )
 
 
-        answer_prompt = f"""
+        # =============================================
+        # WORD COUNTER
+        # =============================================
 
-You are an AI assistant for INGRES.
+        elif tool_name == "word_counter":
 
-Answer the user's question using the
-retrieved information from the uploaded
-PDF documents.
-
-IMPORTANT:
-
-- Use the retrieved PDF information.
-- Do not make up information.
-- Answer directly and clearly.
-- Do not claim information is missing if
-  it is present in the retrieved context.
-- If the answer genuinely is not present,
-  say that the uploaded documents do not
-  contain enough information.
-
-Retrieved PDF Context:
-
-{context}
-
-User Question:
-
-{prompt}
-
-Give a clear and helpful answer.
-"""
-
-
-        answer_response = model.generate_content(
-            answer_prompt
-        )
-
-        return answer_response.text.strip()
-
-
-    # =================================================
-    # WEB SEARCH
-    # =================================================
-
-    elif tool_name == "web_search":
-
-        web_context = search_web(
-            tool_input
-        )
-
-        if not web_context:
-
-            return (
-                "I could not perform the "
-                "web search right now."
+            return count_words(
+                tool_input
             )
 
 
-        web_prompt = f"""
+        # =============================================
+        # SQL DATABASE
+        # =============================================
+
+        elif tool_name == "database":
+
+            sql_query = tool_input.strip()
+
+            if not sql_query.lower().startswith(
+                "select"
+            ):
+
+                return (
+                    "Database security error: "
+                    "only SELECT queries are allowed."
+                )
+
+            return query_database(
+                sql_query
+            )
+
+
+        # =============================================
+        # WEB SEARCH
+        # =============================================
+
+        elif tool_name == "web_search":
+
+            web_context = search_web(
+                tool_input
+            )
+
+            if not web_context:
+
+                return (
+                    "I could not perform the "
+                    "web search right now."
+                )
+
+            web_prompt = f"""
 You are a research assistant.
-
-Answer the user's question using the
-web research below.
 
 WEB RESEARCH:
 
@@ -443,21 +474,31 @@ USER QUESTION:
 
 {prompt}
 
-Give a clear and accurate answer.
+Answer clearly and accurately using
+the provided research.
 """
 
-        response = model.generate_content(
-            web_prompt
-        )
+            response = model.generate_content(
+                web_prompt
+            )
 
-        return response.text.strip()
+            return response.text.strip()
 
 
-    # =================================================
-    # NORMAL GEMINI
-    # =================================================
+        # =============================================
+        # NORMAL GEMINI
+        # =============================================
 
-    else:
+        else:
+
+            response = model.generate_content(
+                prompt
+            )
+
+            return response.text.strip()
+
+
+    except Exception:
 
         response = model.generate_content(
             prompt
@@ -467,16 +508,142 @@ Give a clear and accurate answer.
 
 
 # =====================================================
+# MAIN QUESTION PROCESSING
+# =====================================================
+
+def process_question(prompt):
+
+    # =================================================
+    # STEP 1 — BUILT-IN DATABASE FIRST
+    # =================================================
+
+    with st.spinner(
+        "🔎 Checking INGRES database..."
+    ):
+
+        try:
+
+            database_result = query_database(
+                prompt
+            )
+
+        except Exception:
+
+            database_result = None
+
+
+    # Check whether database actually answers it
+    if database_result:
+
+        database_has_answer = (
+            check_database_relevance(
+                prompt,
+                database_result
+            )
+        )
+
+    else:
+
+        database_has_answer = False
+
+
+    # =================================================
+    # DATABASE HAS ANSWER
+    # =================================================
+
+    if database_has_answer:
+
+        with st.spinner(
+            "🤖 Answering from INGRES database..."
+        ):
+
+            return answer_from_database(
+                prompt,
+                database_result
+            )
+
+
+    # =================================================
+    # STEP 2 — CHECK UPLOADED PDF
+    # =================================================
+
+    with st.spinner(
+        "📄 Checking uploaded PDF..."
+    ):
+
+        try:
+
+            pdf_context = search_knowledge(
+                prompt
+            )
+
+        except Exception:
+
+            pdf_context = ""
+
+
+    # Check PDF relevance
+    if pdf_context:
+
+        pdf_has_answer = check_pdf_relevance(
+            prompt,
+            pdf_context
+        )
+
+    else:
+
+        pdf_has_answer = False
+
+
+    # =================================================
+    # PDF HAS ANSWER
+    # =================================================
+
+    if pdf_has_answer:
+
+        with st.spinner(
+            "🤖 Answering from PDF..."
+        ):
+
+            return answer_from_pdf(
+                prompt,
+                pdf_context
+            )
+
+
+    # =================================================
+    # STEP 3 — NOTHING FOUND
+    # =================================================
+
+    with st.spinner(
+        "🧠 Choosing the next tool..."
+    ):
+
+        return run_other_tools(
+            prompt
+        )
+
+
+# =====================================================
 # CHAT INPUT
 # =====================================================
 
 if prompt := st.chat_input(
-    "Ask something..."
+    "Ask your question..."
 ):
 
-    # -------------------------------------------------
-    # SAVE USER MESSAGE
-    # -------------------------------------------------
+    if not prompt.strip():
+
+        st.warning(
+            "Please enter a valid question."
+        )
+
+        st.stop()
+
+
+    # =================================================
+    # SHOW USER MESSAGE
+    # =================================================
 
     st.session_state.messages.append(
         {
@@ -485,48 +652,41 @@ if prompt := st.chat_input(
         }
     )
 
-
     with st.chat_message("user"):
 
         st.markdown(prompt)
 
 
-    # -------------------------------------------------
-    # GENERATE RESPONSE
-    # -------------------------------------------------
+    # =================================================
+    # GENERATE ANSWER
+    # =================================================
 
     with st.chat_message("assistant"):
 
-        with st.spinner(
-            "Thinking..."
-        ):
+        try:
 
-            try:
+            answer = process_question(
+                prompt
+            )
 
-                answer = process_question(
-                    prompt
-                )
+        except Exception as e:
 
-            except Exception as e:
-
-                answer = (
-                    f"Error while processing "
-                    f"your question: {e}"
-                )
-
+            answer = (
+                f"An error occurred: {e}"
+            )
 
         st.markdown(answer)
 
 
-    # -------------------------------------------------
-    # SAVE ASSISTANT MESSAGE
-    # -------------------------------------------------
+    # =================================================
+    # SAVE ANSWER
+    # =================================================
 
     st.session_state.messages.append(
         {
             "role": "assistant",
             "content": answer
         }
-    )
+                            )
 
 
