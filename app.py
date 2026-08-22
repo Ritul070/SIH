@@ -10,7 +10,6 @@ import json
 # =====================================================
 
 API_KEY = st.secrets["API_KEY"]
-TAVILY_API_KEY = st.secrets["TAVILY_API_KEY"]
 
 genai.configure(api_key=API_KEY)
 
