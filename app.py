@@ -1,4 +1,4 @@
-
+  
 import streamlit as st
 import sqlite3
 import requests
@@ -56,7 +56,7 @@ for message in st.session_state.messages:
 
 
 # =====================================================
-# SIDEBAR PDF UPLOAD
+# PDF UPLOAD
 # =====================================================
 
 st.sidebar.header("📄 INGRES PDF")
@@ -65,7 +65,6 @@ uploaded_file = st.sidebar.file_uploader(
     "Upload INGRES PDF",
     type=["pdf"]
 )
-
 
 if uploaded_file is not None:
 
@@ -107,65 +106,28 @@ def get_connection():
 
 
 # =====================================================
-# SEARCH FAQ DATABASE
+# GET DATABASE LOCATIONS
 # =====================================================
 
-def search_faq(question):
+def get_database_locations():
 
     conn = get_connection()
+
     cursor = conn.cursor()
 
     try:
 
         cursor.execute("""
-        SELECT question, answer
-        FROM faq
+        SELECT
+            state,
+            district,
+            block
+        FROM assessments
         """)
 
         rows = cursor.fetchall()
 
-        question_lower = question.lower()
-
-        matches = []
-
-        for faq_question, faq_answer in rows:
-
-            text = (
-                faq_question + " " + faq_answer
-            ).lower()
-
-            score = 0
-
-            for word in question_lower.split():
-
-                word = word.strip(
-                    ".,?!:;'\""
-                )
-
-                if len(word) > 2 and word in text:
-                    score += 1
-
-            if score > 0:
-
-                matches.append(
-                    (score, faq_question, faq_answer)
-                )
-
-        matches.sort(
-            key=lambda x: x[0],
-            reverse=True
-        )
-
-        result = ""
-
-        for score, q, answer in matches[:5]:
-
-            result += (
-                f"Question: {q}\n"
-                f"Answer: {answer}\n\n"
-            )
-
-        return result
+        return rows
 
     finally:
 
@@ -173,12 +135,15 @@ def search_faq(question):
 
 
 # =====================================================
-# SEARCH ASSESSMENTS DATABASE
+# SEARCH ASSESSMENTS
 # =====================================================
 
 def search_assessments(question):
 
+    q = question.lower()
+
     conn = get_connection()
+
     cursor = conn.cursor()
 
     try:
@@ -199,61 +164,54 @@ def search_assessments(question):
 
         rows = cursor.fetchall()
 
-        question_lower = question.lower()
+        # -------------------------------------------------
+        # FIRST: LOOK FOR EXACT LOCATION NAMES
+        # -------------------------------------------------
 
-        matches = []
+        location_matches = []
 
         for row in rows:
 
-            state = str(row[0])
-            district = str(row[1])
-            block = str(row[2])
-            year = str(row[3])
-            recharge = str(row[4])
-            extractable = str(row[5])
-            extraction = str(row[6])
-            stage = str(row[7])
-            category = str(row[8])
-
-            searchable_text = f"""
-            {state}
-            {district}
-            {block}
-            {year}
-            {recharge}
-            {extractable}
-            {extraction}
-            {stage}
-            {category}
-            """.lower()
+            state = str(row[0]).lower()
+            district = str(row[1]).lower()
+            block = str(row[2]).lower()
 
             score = 0
 
-            for word in question_lower.split():
+            # Exact district match gets highest priority
+            if district in q:
+                score += 100
 
-                word = word.strip(
-                    ".,?!:;'\""
-                )
+            # Exact block match
+            if block in q:
+                score += 80
 
-                if len(word) > 2 and word in searchable_text:
-                    score += 1
+            # Exact state match
+            if state in q:
+                score += 40
 
             if score > 0:
 
-                matches.append(
+                location_matches.append(
                     (score, row)
                 )
 
-        matches.sort(
-            key=lambda x: x[0],
-            reverse=True
-        )
+        # -------------------------------------------------
+        # RETURN LOCATION MATCHES
+        # -------------------------------------------------
 
-        result = ""
+        if location_matches:
 
-        for score, row in matches[:10]:
+            location_matches.sort(
+                key=lambda x: x[0],
+                reverse=True
+            )
 
-            result += f"""
+            result = ""
+
+            for score, row in location_matches:
+
+                result += f"""
 State: {row[0]}
 District: {row[1]}
 Block: {row[2]}
@@ -266,7 +224,66 @@ Category: {row[8]}
 
 """
 
-        return result
+            return result
+
+        # -------------------------------------------------
+        # SECOND: CATEGORY SEARCH
+        # -------------------------------------------------
+
+        categories = [
+            "safe",
+            "semi-critical",
+            "semi critical",
+            "critical",
+            "over-exploited",
+            "over exploited"
+        ]
+
+        category_matches = []
+
+        for row in rows:
+
+            category = str(
+                row[8]
+            ).lower()
+
+            for cat in categories:
+
+                if cat in q:
+
+                    normalized_category = (
+                        cat.replace(
+                            " ",
+                            "-"
+                        )
+                    )
+
+                    if category == normalized_category:
+
+                        category_matches.append(row)
+
+        if category_matches:
+
+            result = ""
+
+            for row in category_matches:
+
+                result += f"""
+State: {row[0]}
+District: {row[1]}
+Block: {row[2]}
+Year: {row[3]}
+Recharge: {row[4]} BCM
+Extractable Groundwater: {row[5]} BCM
+Extraction: {row[6]} BCM
+Stage of Extraction: {row[7]}%
+Category: {row[8]}
+
+"""
+
+            return result
+
+        return ""
 
     finally:
 
@@ -282,13 +299,14 @@ def special_database_query(question):
     q = question.lower()
 
     conn = get_connection()
+
     cursor = conn.cursor()
 
     try:
 
-        # ---------------------------------------------
+        # -------------------------------------------------
         # HIGHEST STAGE
-        # ---------------------------------------------
+        # -------------------------------------------------
 
         if (
             "highest" in q
@@ -326,9 +344,9 @@ Category: {row[4]}
 """
 
 
-        # ---------------------------------------------
+        # -------------------------------------------------
         # LOWEST STAGE
-        # ---------------------------------------------
+        # -------------------------------------------------
 
         if (
             "lowest" in q
@@ -366,9 +384,9 @@ Category: {row[4]}
 """
 
 
-        # ---------------------------------------------
+        # -------------------------------------------------
         # OVER-EXPLOITED
-        # ---------------------------------------------
+        # -------------------------------------------------
 
         if (
             "over-exploited" in q
@@ -389,7 +407,9 @@ Category: {row[4]}
 
             if rows:
 
-                answer = "Over-exploited areas:\n\n"
+                answer = (
+                    "The over-exploited areas are:\n\n"
+                )
 
                 for row in rows:
 
@@ -402,9 +422,9 @@ Category: {row[4]}
                 return answer
 
 
-        # ---------------------------------------------
+        # -------------------------------------------------
         # SAFE AREAS
-        # ---------------------------------------------
+        # -------------------------------------------------
 
         if (
             "safe areas" in q
@@ -425,7 +445,7 @@ Category: {row[4]}
 
             if rows:
 
-                answer = "Safe areas:\n\n"
+                answer = "The safe areas are:\n\n"
 
                 for row in rows:
 
@@ -438,9 +458,9 @@ Category: {row[4]}
                 return answer
 
 
-        # ---------------------------------------------
+        # -------------------------------------------------
         # CRITICAL AREAS
-        # ---------------------------------------------
+        # -------------------------------------------------
 
         if (
             "critical areas" in q
@@ -461,7 +481,7 @@ Category: {row[4]}
 
             if rows:
 
-                answer = "Critical areas:\n\n"
+                answer = "The critical areas are:\n\n"
 
                 for row in rows:
 
@@ -481,6 +501,88 @@ Category: {row[4]}
 
 
 # =====================================================
+# SEARCH FAQ
+# =====================================================
+
+def search_faq(question):
+
+    conn = get_connection()
+
+    cursor = conn.cursor()
+
+    try:
+
+        cursor.execute("""
+        SELECT
+            question,
+            answer
+        FROM faq
+        """)
+
+        rows = cursor.fetchall()
+
+        q = question.lower()
+
+        matches = []
+
+        for faq_question, faq_answer in rows:
+
+            faq_q = faq_question.lower()
+
+            score = 0
+
+            # Exact important phrase
+            if faq_q in q or q in faq_q:
+
+                score += 100
+
+            # Individual meaningful words
+            for word in faq_q.split():
+
+                word = word.strip(
+                    ".,?!:;'\""
+                )
+
+                if len(word) > 3 and word in q:
+
+                    score += 10
+
+            if score > 0:
+
+                matches.append(
+                    (
+                        score,
+                        faq_question,
+                        faq_answer
+                    )
+                )
+
+        matches.sort(
+            key=lambda x: x[0],
+            reverse=True
+        )
+
+        if not matches:
+
+            return ""
+
+        result = ""
+
+        for score, faq_question, faq_answer in matches[:3]:
+
+            result += (
+                f"Question: {faq_question}\n"
+                f"Answer: {faq_answer}\n\n"
+            )
+
+        return result
+
+    finally:
+
+        conn.close()
+
+
+# =====================================================
 # SEARCH PDF
 # =====================================================
 
@@ -489,6 +591,7 @@ def search_pdf(question):
     pdf_text = st.session_state.pdf_text
 
     if not pdf_text:
+
         return ""
 
     words = [
@@ -514,12 +617,16 @@ def search_pdf(question):
         for word in words:
 
             if word in paragraph_lower:
+
                 score += 1
 
         if score > 0:
 
             matches.append(
-                (score, paragraph)
+                (
+                    score,
+                    paragraph
+                )
             )
 
     matches.sort(
@@ -528,6 +635,7 @@ def search_pdf(question):
     )
 
     if not matches:
+
         return ""
 
     context = ""
@@ -535,7 +643,8 @@ def search_pdf(question):
     for score, paragraph in matches[:8]:
 
         context += (
-            paragraph + "\n\n"
+            paragraph
+            + "\n\n"
         )
 
     return context
@@ -550,19 +659,24 @@ def ai_answer(question, context):
     prompt = f"""
 You are an AI assistant for the INGRES project.
 
-Use the provided context to answer the
-user's question.
+Answer the user's question using the
+provided context.
 
 CONTEXT:
+
 {context}
 
 USER QUESTION:
+
 {question}
 
 Rules:
+
 - Do not invent facts.
 - Use the provided information.
-- Give a clear and helpful answer.
+- Be clear and concise.
+- If the context does not contain the answer,
+  say so clearly.
 """
 
     response = client.responses.create(
@@ -628,13 +742,13 @@ def search_web(query):
 
 
 # =====================================================
-# MAIN QUESTION ROUTER
+# MAIN ROUTER
 # =====================================================
 
 def process_question(question):
 
     # =================================================
-    # 1. SPECIAL DATABASE QUERY
+    # 1. SPECIAL DATABASE QUERIES
     # =================================================
 
     result = special_database_query(
@@ -647,20 +761,7 @@ def process_question(question):
 
 
     # =================================================
-    # 2. FAQ DATABASE
-    # =================================================
-
-    faq_context = search_faq(
-        question
-    )
-
-    if faq_context:
-
-        return faq_context
-
-
-    # =================================================
-    # 3. ASSESSMENT DATABASE
+    # 2. ASSESSMENTS FIRST
     # =================================================
 
     assessment_context = search_assessments(
@@ -670,6 +771,19 @@ def process_question(question):
     if assessment_context:
 
         return assessment_context
+
+
+    # =================================================
+    # 3. FAQ SECOND
+    # =================================================
+
+    faq_context = search_faq(
+        question
+    )
+
+    if faq_context:
+
+        return faq_context
 
 
     # =================================================
@@ -689,7 +803,7 @@ def process_question(question):
 
 
     # =================================================
-    # 5. WEB SEARCH
+    # 5. WEB
     # =================================================
 
     web_context = search_web(
@@ -731,7 +845,9 @@ if prompt := st.chat_input(
         st.stop()
 
 
-    # User message
+    # -------------------------------------------------
+    # USER MESSAGE
+    # -------------------------------------------------
 
     st.session_state.messages.append(
         {
@@ -745,7 +861,9 @@ if prompt := st.chat_input(
         st.markdown(prompt)
 
 
-    # Assistant
+    # -------------------------------------------------
+    # ASSISTANT
+    # -------------------------------------------------
 
     with st.chat_message("assistant"):
 
@@ -762,7 +880,9 @@ if prompt := st.chat_input(
         st.markdown(answer)
 
 
-    # Save assistant message
+    # -------------------------------------------------
+    # SAVE ANSWER
+    # -------------------------------------------------
 
     st.session_state.messages.append(
         {
